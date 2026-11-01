@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>レーンシューター・ラッシュ | 3レーン ミニゲーム</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, system-ui, sans-serif;
+    background: #0f1220;
+    color: #fff;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    overflow: hidden;
+    touch-action: none;
+  }
+  header { padding: 10px 8px 4px; text-align: center; }
+  header h1 { font-size: 20px; letter-spacing: .04em; }
+  header p { font-size: 12px; color: #aab; margin-top: 2px; }
+  #wrap {
+    position: relative;
+    width: min(96vw, 420px);
+    aspect-ratio: 420 / 640;
+    max-height: calc(100vh - 120px);
+  }
+  canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    background: #232946;
+    border-radius: 14px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.5);
+  }
+  #hud {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    padding: 8px 4px 2px;
+    font-size: 14px;
+    flex-wrap: wrap;
+  }
+  .chip {
+    background: #1c2038;
+    border: 1px solid #343a5e;
+    border-radius: 999px;
+    padding: 4px 12px;
+  }
+  .chip b { color: #ffd166; }
+  #controls { padding: 6px; display: flex; gap: 10px; }
+  button {
+    font: inherit;
+    font-size: 15px;
+    border: none;
+    border-radius: 999px;
+    padding: 9px 22px;
+    background: #ffd166;
+    color: #232946;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  button:active { transform: scale(.97); }
+  .move-btn { background: #343a5e; color: #fff; min-width: 64px; font-size: 18px; }
+  footer { font-size: 11px; color: #778; padding-bottom: 8px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎯 レーンシューター・ラッシュ</h1>
+  <p>レーンを選んで進め！ 仲間を増やし、武器を鍛え、押し寄せる敵を撃ち抜け</p>
+</header>
+
+<div id="wrap">
+  <canvas id="game" width="420" height="640"></canvas>
+</div>
+
+<div id="hud">
+  <span class="chip">👥 仲間 <b id="hud-squad">5</b></span>
+  <span class="chip">🔫 武器 Lv.<b id="hud-weapon">1</b></span>
+  <span class="chip">⭐ スコア <b id="hud-score">0</b></span>
+</div>
+
+<div id="controls">
+  <button class="move-btn" id="btn-left" aria-label="左のレーンへ">◀</button>
+  <button id="btn-main">スタート</button>
+  <button class="move-btn" id="btn-right" aria-label="右のレーンへ">▶</button>
+</div>
+
+<footer>操作： ← → キー / A・D / スワイプ / 画面タップ（左・右）でもレーン移動できるよ</footer>
+
+<script>
+"use strict";
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+
+// ---- レーン ----
+const LANES_X = [70, 210, 350]; // 3レーンの中心x
+const PLAYER_Y = H - 110;
+
+// ---- 状態 ----
+let state = "title"; // title | playing | over
+let squad, weaponLv, score, distance, speed;
+let playerLane, playerX;
+let bullets, enemies, gateRows, particles, floaters;
+let fireTimer, spawnTimer, gateTimer, timeAlive;
+let lastTs = 0;
+
+function weaponDamage() { return weaponLv; }             // 1発のダメージ = 武器Lv
+function fireInterval() { return Math.max(90, 240 - weaponLv * 12); } // ms
+
+function reset() {
+  squad = 5;
+  weaponLv = 1;
+  score = 0;
+  distance = 0;
+  speed = 2.2;
+  playerLane = 1;
+  playerX = LANES_X[1];
+  bullets = [];
+  enemies = [];
+  gateRows = [];
+  particles = [];
+  floaters = [];
+  fireTimer = 0;
+  spawnTimer = 900;
+  gateTimer = 1500;
+  timeAlive = 0;
+}
+
+function addFloater(x, y, text, color) {
+  floaters.push({ x, y, text, color, life: 1 });
+}
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 4,
+      vy: (Math.random() - 0.5) * 4 - 1,
+      life: 1, color, r: 2 + Math.random() * 3
+    });
+  }
+}
+
+// ---- 敵（大群ブロック） ----
+function spawnEnemy() {
+  const lane = Math.floor(Math.random() * 3);
+  const scale = 1 + timeAlive / 45; // 時間で少しずつ強く
+  const hp = Math.round((18 + Math.random() * 22) * scale);
+  enemies.push({
+    lane, x: LANES_X[lane], y: -60,
+    w: 104, h: 64, hp, maxHp: hp,
+    speed: speed * (0.55 + Math.random() * 0.25)
+  });
+}
+
+// ---- ゲート行：3レーンに「仲間+」「武器UP」「敵の大群」が並ぶ ----
+function spawnGateRow() {
+  // 3種類をシャッフルして各レーンに配置
+  const kinds = ["recruit", "weapon", "trap"];
+  for (let i = kinds.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [kinds[i], kinds[j]] = [kinds[j], kinds[i]];
+  }
+  const row = {
+    y: -56,
+    speed: speed,
+    applied: false,
+    gates: kinds.map((kind, lane) => {
+      let label, value;
+      if (kind === "recruit") { value = 3 + Math.floor(Math.random() * 6); label = "👥 +" + value; }
+      if (kind === "weapon")  { value = 1; label = "🔫 武器UP"; }
+      if (kind === "trap")    { value = Math.round((26 + Math.random() * 20) * (1 + timeAlive / 60)); label = "💀 敵の大群"; }
+      return { kind, lane, value, label };
+    })
+  };
+  gateRows.push(row);
+}
+
+function applyGate(g) {
+  const x = LANES_X[g.lane];
+  if (g.kind === "recruit") {
+    squad += g.value;
+    addFloater(x, PLAYER_Y - 90, "+" + g.value + " 人!", "#7bf1a8");
+    burst(x, PLAYER_Y - 40, "#7bf1a8", 14);
+  } else if (g.kind === "weapon") {
+    weaponLv += 1;
+    addFloater(x, PLAYER_Y - 90, "武器 Lv." + weaponLv + "!", "#ffd166");
+    burst(x, PLAYER_Y - 40, "#ffd166", 14);
+  } else if (g.kind === "trap") {
+    // 大群がその場に出現する（HP付きブロック）
+    enemies.push({
+      lane: g.lane, x, y: PLAYER_Y - 260,
+      w: 104, h: 64, hp: g.value, maxHp: g.value,
+      speed: speed * 0.7
+    });
+    addFloater(x, PLAYER_Y - 90, "大群出現!", "#ff6b6b");
+  }
+}
+
+// ---- 更新 ----
+function update(dt) {
+  timeAlive += dt / 1000;
+  distance += speed * dt / 16.7;
+  speed = 2.2 + Math.min(1.6, timeAlive / 60); // 徐々に加速
+
+  // プレイヤーのレーン移動（なめらか）
+  const target = LANES_X[playerLane];
+  playerX += (target - playerX) * Math.min(1, dt / 55);
+
+  // 射撃：仲間の数だけ連射（表示は最大15発/回に制限）
+  fireTimer -= dt;
+  if (fireTimer <= 0) {
+    fireTimer = fireInterval();
+    const shots = Math.min(squad, 15);
+    for (let i = 0; i < shots; i++) {
+      const spread = (i - (shots - 1) / 2) * 9;
+      bullets.push({
+        x: playerX + spread, y: PLAYER_Y - 34,
+        vy: -11, dmg: weaponDamage()
+      });
+    }
+  }
+
+  // スポーン
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) { spawnEnemy(); spawnTimer = 1500 + Math.random() * 900; }
+  gateTimer -= dt;
+  if (gateTimer <= 0) { spawnGateRow(); gateTimer = 3400 + Math.random() * 1200; }
+
+  // 弾
+  for (const b of bullets) b.y += b.vy;
+  bullets = bullets.filter(b => b.y > -20);
+
+  // ゲート行
+  for (const row of gateRows) {
+    row.y += row.speed * dt / 16.7;
+    if (!row.applied && row.y >= PLAYER_Y - 44) {
+      row.applied = true;
+      applyGate(row.gates[playerLane]);
+    }
+  }
+  gateRows = gateRows.filter(r => r.y < H + 80);
+
+  // 敵
+  for (const e of enemies) {
+    e.y += e.speed * dt / 16.7;
+    // 弾との当たり判定
+    for (const b of bullets) {
+      if (b.dead) continue;
+      if (Math.abs(b.x - e.x) < e.w / 2 && b.y < e.y + e.h / 2 && b.y > e.y - e.h / 2) {
+        b.dead = true;
+        e.hp -= b.dmg;
+        burst(b.x, b.y, "#ffe66d", 2);
+      }
+    }
+    if (e.hp <= 0 && !e.dead) {
+      e.dead = true;
+      score += 10;
+      burst(e.x, e.y, "#ff6b6b", 18);
+      addFloater(e.x, e.y, "+10", "#fff");
+    }
+    // プレイヤーに到達：残りHPに応じて仲間が減る
+    if (!e.dead && e.y + e.h / 2 >= PLAYER_Y - 26) {
+      e.dead = true;
+      const loss = Math.max(1, Math.ceil(e.hp / 8));
+      squad -= loss;
+      burst(playerX, PLAYER_Y - 20, "#ff6b6b", 22);
+      addFloater(playerX, PLAYER_Y - 100, "-" + loss + " 人…", "#ff6b6b");
+      if (squad <= 0) { squad = 0; gameOver(); }
+    }
+  }
+  enemies = enemies.filter(e => !e.dead && e.y < H + 90);
+  bullets = bullets.filter(b => !b.dead);
+
+  // パーティクル等
+  for (const p of particles) { p.x += p.vx; p.y += p.vy; p.life -= dt / 450; }
+  particles = particles.filter(p => p.life > 0);
+  for (const f of floaters) { f.y -= dt / 28; f.life -= dt / 1100; }
+  floaters = floaters.filter(f => f.life > 0);
+
+  updateHud();
+}
+
+function gameOver() {
+  state = "over";
+  document.getElementById("btn-main").textContent = "もう一度";
+}
+
+// ---- 描画 ----
+function drawRoad() {
+  ctx.fillStyle = "#232946";
+  ctx.fillRect(0, 0, W, H);
+  // レーン区切り（流れる破線）
+  ctx.strokeStyle = "rgba(255,255,255,.28)";
+  ctx.lineWidth = 4;
+  ctx.setLineDash([26, 30]);
+  ctx.lineDashOffset = (distance * 3) % 56;
+  for (const x of [140, 280]) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  // レーン番号
+  ctx.fillStyle = "rgba(255,255,255,.35)";
+  ctx.font = "bold 15px sans-serif";
+  ctx.textAlign = "center";
+  LANES_X.forEach((x, i) => ctx.fillText("LANE " + (i + 1), x, 24));
+}
+
+function drawGateRow(row) {
+  for (const g of row.gates) {
+    const x = LANES_X[g.lane];
+    let fill, stroke;
+    if (g.kind === "recruit") { fill = "rgba(46,160,90,.88)"; stroke = "#7bf1a8"; }
+    else if (g.kind === "weapon") { fill = "rgba(30,110,200,.88)"; stroke = "#8ecbff"; }
+    else { fill = "rgba(190,40,50,.88)"; stroke = "#ff9d9d"; }
+    ctx.fillStyle = fill;
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 3;
+    const w = 118, h = 52;
+    roundRect(x - w / 2, row.y - h / 2, w, h, 10); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 16px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(g.label, x, row.y + 6);
+  }
+}
+
+function drawEnemy(e) {
+  ctx.fillStyle = "#e63946";
+  roundRect(e.x - e.w / 2, e.y - e.h / 2, e.w, e.h, 12); ctx.fill();
+  ctx.fillStyle = "#b91f2e";
+  roundRect(e.x - e.w / 2, e.y - e.h / 2, e.w, 18, 12); ctx.fill();
+  // 目（モンスター風）
+  ctx.fillStyle = "#fff";
+  ctx.beginPath(); ctx.arc(e.x - 22, e.y - 4, 9, 0, 7); ctx.arc(e.x + 22, e.y - 4, 9, 0, 7); ctx.fill();
+  ctx.fillStyle = "#222";
+  ctx.beginPath(); ctx.arc(e.x - 22, e.y - 3, 4, 0, 7); ctx.arc(e.x + 22, e.y - 3, 4, 0, 7); ctx.fill();
+  // HP
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 20px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(e.hp, e.x, e.y + 26);
+  // HPバー
+  const ratio = Math.max(0, e.hp / e.maxHp);
+  ctx.fillStyle = "rgba(0,0,0,.35)";
+  ctx.fillRect(e.x - e.w / 2, e.y + e.h / 2 + 5, e.w, 6);
+  ctx.fillStyle = "#ffd166";
+  ctx.fillRect(e.x - e.w / 2, e.y + e.h / 2 + 5, e.w * ratio, 6);
+}
+
+function drawPlayer() {
+  // 仲間をグリッド状に描く（最大24人まで表示）
+  const show = Math.min(squad, 24);
+  const cols = 5, r = 11;
+  for (let i = 0; i < show; i++) {
+    const cx = playerX + (i % cols - (cols - 1) / 2) * 24;
+    const cy = PLAYER_Y + Math.floor(i / cols) * 22 - 10;
+    ctx.fillStyle = "#4dabf7";
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.fill();
+    ctx.fillStyle = "#1864ab";
+    ctx.beginPath(); ctx.arc(cx, cy - 3, r * 0.55, 0, 7); ctx.fill();
+    // 銃
+    ctx.fillStyle = "#ddd";
+    ctx.fillRect(cx - 2, cy - 24, 4, 12);
+  }
+  // 人数バッジ
+  ctx.fillStyle = "#ffd166";
+  roundRect(playerX - 26, PLAYER_Y + 64, 52, 24, 12); ctx.fill();
+  ctx.fillStyle = "#232946";
+  ctx.font = "bold 15px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("×" + squad, playerX, PLAYER_Y + 81);
+}
+
+function draw() {
+  drawRoad();
+  for (const row of gateRows) drawGateRow(row);
+  for (const e of enemies) drawEnemy(e);
+  // 弾
+  ctx.fillStyle = "#ffe66d";
+  for (const b of bullets) { ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, 7); ctx.fill(); }
+  if (state !== "title") drawPlayer();
+  // パーティクル
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // フローティング文字
+  for (const f of floaters) {
+    ctx.globalAlpha = Math.max(0, f.life);
+    ctx.fillStyle = f.color;
+    ctx.font = "bold 19px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+
+  if (state === "title") overlay("🎯 レーンシューター・ラッシュ",
+    ["3つのレーンから進む道を選ぼう", "", "🟢 仲間が増えるレーン", "🔵 武器が強くなるレーン", "🔴 敵の大群がいるレーン", "", "撃ち続けながら進み、生き残れ！"]);
+  if (state === "over") overlay("ゲームオーバー",
+    ["スコア： " + score, "進んだ距離： " + Math.floor(distance / 10) + " m", "武器 Lv." + weaponLv + " ／ 最終人数 " + squad, "", "「もう一度」ボタンで再挑戦"]);
+}
+
+function overlay(title, lines) {
+  ctx.fillStyle = "rgba(10,12,26,.72)";
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.font = "bold 25px sans-serif";
+  ctx.fillText(title, W / 2, 210);
+  ctx.font = "16px sans-serif";
+  lines.forEach((s, i) => ctx.fillText(s, W / 2, 252 + i * 27));
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// ---- ループ ----
+function loop(ts) {
+  const dt = Math.min(50, ts - lastTs || 16);
+  lastTs = ts;
+  if (state === "playing") update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function updateHud() {
+  document.getElementById("hud-squad").textContent = squad;
+  document.getElementById("hud-weapon").textContent = weaponLv;
+  document.getElementById("hud-score").textContent = score;
+}
+
+// ---- 操作 ----
+function move(dir) {
+  if (state !== "playing") return;
+  playerLane = Math.max(0, Math.min(2, playerLane + dir));
+}
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") move(-1);
+  if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") move(1);
+  if ((e.key === " " || e.key === "Enter") && state !== "playing") startGame();
+});
+document.getElementById("btn-left").addEventListener("click", () => move(-1));
+document.getElementById("btn-right").addEventListener("click", () => move(1));
+
+let touchX = null;
+canvas.addEventListener("touchstart", e => { touchX = e.touches[0].clientX; }, { passive: true });
+canvas.addEventListener("touchend", e => {
+  if (touchX === null) return;
+  const dx = e.changedTouches[0].clientX - touchX;
+  if (Math.abs(dx) > 24) move(dx > 0 ? 1 : -1);
+  else {
+    // タップ：画面の左半分/右半分で移動
+    const rect = canvas.getBoundingClientRect();
+    const tx = e.changedTouches[0].clientX - rect.left;
+    const center = LANES_X[playerLane] / W * rect.width;
+    if (tx < center - 10) move(-1); else if (tx > center + 10) move(1);
+  }
+  touchX = null;
+}, { passive: true });
+canvas.addEventListener("click", e => {
+  if (state !== "playing") { startGame(); return; }
+  const rect = canvas.getBoundingClientRect();
+  const tx = e.clientX - rect.left;
+  const center = LANES_X[playerLane] / W * rect.width;
+  if (tx < center - 10) move(-1); else if (tx > center + 10) move(1);
+});
+
+function startGame() {
+  reset();
+  state = "playing";
+  document.getElementById("btn-main").textContent = "プレイ中…";
+  updateHud();
+}
+document.getElementById("btn-main").addEventListener("click", () => {
+  if (state !== "playing") startGame();
+});
+
+reset();
+updateHud();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
