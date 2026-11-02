@@ -145,16 +145,19 @@ function burst(x, y, color, n) {
   }
 }
 
-// ---- 敵（大群ブロック） ----
-function spawnEnemy() {
-  const lane = Math.floor(Math.random() * 3);
+// ---- 敵（大群ブロック）：常に全レーンに1体ずつ、横一列で出現 ----
+function spawnEnemyRow() {
   const scale = 1 + timeAlive / 45; // 時間で少しずつ強く
-  const hp = Math.round((18 + Math.random() * 22) * scale);
-  enemies.push({
-    lane, x: LANES_X[lane], y: -60,
-    w: 104, h: 64, hp, maxHp: hp,
-    speed: speed * (0.55 + Math.random() * 0.25)
-  });
+  const rowSpeed = speed * (0.55 + Math.random() * 0.2);
+  // レーンごとにHPを変える（弱いレーンを見極めて進むのがコツ）
+  for (let lane = 0; lane < 3; lane++) {
+    const hp = Math.round((14 + Math.random() * 26) * scale);
+    enemies.push({
+      lane, x: LANES_X[lane], y: -60,
+      w: 104, h: 64, hp, maxHp: hp,
+      speed: rowSpeed
+    });
+  }
 }
 
 // ---- ゲート行：3レーンに「仲間+」「武器UP」「敵の大群」が並ぶ ----
@@ -227,7 +230,7 @@ function update(dt) {
 
   // スポーン
   spawnTimer -= dt;
-  if (spawnTimer <= 0) { spawnEnemy(); spawnTimer = 1500 + Math.random() * 900; }
+  if (spawnTimer <= 0) { spawnEnemyRow(); spawnTimer = 2600 + Math.random() * 800; }
   gateTimer -= dt;
   if (gateTimer <= 0) { spawnGateRow(); gateTimer = 3400 + Math.random() * 1200; }
 
@@ -263,8 +266,9 @@ function update(dt) {
       burst(e.x, e.y, "#ff6b6b", 18);
       addFloater(e.x, e.y, "+10", "#fff");
     }
-    // プレイヤーに到達：残りHPに応じて仲間が減る
-    if (!e.dead && e.y + e.h / 2 >= PLAYER_Y - 26) {
+    // プレイヤーに到達（同じレーンの敵だけ）：残りHPに応じて仲間が減る
+    // 他レーンの敵は横を通り過ぎて画面下へ消える
+    if (!e.dead && e.lane === playerLane && e.y + e.h / 2 >= PLAYER_Y - 26) {
       e.dead = true;
       const loss = Math.max(1, Math.ceil(e.hp / 8));
       squad -= loss;
@@ -402,7 +406,7 @@ function draw() {
   ctx.globalAlpha = 1;
 
   if (state === "title") overlay("🎯 レーンシューター・ラッシュ",
-    ["3つのレーンから進む道を選ぼう", "", "🟢 仲間が増えるレーン", "🔵 武器が強くなるレーン", "🔴 敵の大群がいるレーン", "", "撃ち続けながら進み、生き残れ！"]);
+    ["敵は全レーンに押し寄せる！", "HPの低いレーンを撃ち破って進もう", "", "🟢 仲間が増えるレーン", "🔵 武器が強くなるレーン", "🔴 敵の大群がいるレーン", "", "撃ち続けながら進み、生き残れ！"]);
   if (state === "over") overlay("ゲームオーバー",
     ["スコア： " + score, "進んだ距離： " + Math.floor(distance / 10) + " m", "武器 Lv." + weaponLv + " ／ 最終人数 " + squad, "", "「もう一度」ボタンで再挑戦"]);
 }
